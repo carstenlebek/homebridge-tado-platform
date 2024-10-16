@@ -502,6 +502,7 @@ module.exports = {
       config.homes.forEach((home) => {
         let error = false;
         let activeZones = 0;
+        let activeRooms = 0;
 
         if (!home.name) {
           Logger.warn('There is no name configured for this home. This home will be skipped.');
@@ -534,6 +535,7 @@ module.exports = {
             weather: home.weather || {},
             extras: home.extras || {},
             zones: home.zones ? home.zones.filter((zone) => zone && zone.active) : [],
+            rooms: home.rooms ? home.rooms.filter((room) => room && room.active) : [],
             presence:
               home.presence && home.presence.user ? home.presence.user.filter((user) => user && user.active) : [],
             childLock:
@@ -680,6 +682,172 @@ module.exports = {
                         newConfig.subtype = 'zone-humidity';
                         newConfig.model = newConfig.subtype;
                         newConfig.serialNumber = hashCode(zone.name);
+
+                        devices.set(uuid2, newConfig);
+                      }
+                    }
+                  }
+                }
+              }
+            });
+
+            if (validOpenWindowSwitches.length) {
+              const name = home.name + ' Open Window';
+              const uuid = UUIDGen.generate(name);
+
+              if (devices.has(uuid)) {
+                Logger.warn('Multiple devices are configured with this name. Duplicate devices will be skipped.', name);
+              } else {
+                let config = { ...accessoryConfig };
+
+                config.name = name;
+                config.subtype = 'zone-window-switch';
+                config.openWindows = validOpenWindowSwitches;
+                config.model = config.subtype;
+                config.serialNumber = hashCode(name);
+
+                devices.set(uuid, config);
+              }
+            }
+          }
+
+          if (home.rooms && home.rooms.length) {
+            let validOpenWindowSwitches = [];
+
+            home.rooms.forEach((room) => {
+              if (room.active) {
+                let valid_boilerTypes = ['SWITCH', 'FAUCET'];
+                let valid_roomTypes = ['HEATING'];
+                let valid_modes = ['MANUAL', 'AUTO', 'TIMER', 'CUSTOM'];
+
+                if (!room.name) {
+                  Logger.warn('There is no name configured for this room. This room will be skipped.', home.name);
+                  error = true;
+                } else if (!valid_roomTypes.includes(room.type)) {
+                  Logger.warn(
+                    'There is no or no correct room type configured for this room. Setting it to "HEATING".',
+                    room.name
+                  );
+                  room.type = 'HEATING';
+                }
+
+                if (!error) {
+                  activeRooms += 1;
+
+                  const name = home.name + ' ' + room.name + (room.type === 'HEATING' ? ' Heater' : ' Boiler');
+
+                  const uuid = UUIDGen.generate(name);
+
+                  if (devices.has(uuid)) {
+                    Logger.warn(
+                      'Multiple devices are configured with this name. Duplicate devices will be skipped.',
+                      name
+                    );
+                  } else {
+                    let config = { ...accessoryConfig };
+
+                    config.name = name;
+
+                    config.subtype =
+                      room.type === 'HEATING'
+                        ? room.easyMode
+                          ? 'zone-heatercooler'
+                          : 'zone-thermostat'
+                        : valid_boilerTypes.includes(room.accTypeBoiler) && room.accTypeBoiler === 'FAUCET'
+                        ? 'zone-faucet'
+                        : 'zone-switch';
+
+                    config.subtype = room.boilerTempSupport ? 'zone-heatercooler-boiler' : config.subtype;
+
+                    config.roomId = room.id;
+                    config.type = room.type;
+                    config.airQuality = room.airQuality;
+                    config.separateTemperature = room.separateTemperature;
+                    config.separateHumidity = room.separateHumidity;
+                    config.minStep = room.minStep;
+                    config.minValue = room.minValue;
+                    config.maxValue = room.maxValue;
+                    config.openWindowSensor = room.openWindowSensor;
+                    config.openWindowSwitch = room.openWindowSwitch;
+                    config.noBattery = room.noBattery;
+                    config.mode = valid_modes.includes(room.mode) ? room.mode : 'MANUAL';
+                    config.modeTimer = room.modeTimer && room.modeTimer >= 1 ? room.modeTimer : 1;
+                    config.delaySwitch = room.delaySwitch;
+                    config.autoOffDelay = room.autoOffDelay;
+                    config.model = room.type;
+                    config.serialNumber = hashCode(name);
+
+                    devices.set(uuid, config);
+
+                    //Configure openWindowSensor
+                    if (room.openWindowSensor) {
+                      const thisName = home.name + ' ' + room.name + ' Window';
+
+                      const uuid2 = UUIDGen.generate(thisName);
+
+                      if (devices.has(uuid2)) {
+                        Logger.warn(
+                          'Multiple devices are configured with this name. Duplicate devices will be skipped.',
+                          thisName
+                        );
+                      } else {
+                        let newConfig = { ...config };
+                        newConfig.name = thisName;
+                        newConfig.subtype = 'zone-window-contact';
+                        newConfig.model = newConfig.subtype;
+                        newConfig.serialNumber = hashCode(room.name);
+
+                        devices.set(uuid2, newConfig);
+                      }
+                    }
+
+                    //Configure openWindowSwitch
+                    if (room.openWindowSwitch) {
+                      validOpenWindowSwitches.push({
+                        name: room.name + ' Window',
+                        zoneId: room.id,
+                      });
+                    }
+
+                    //Configure  Separate TemperatureSensor
+                    if (room.separateTemperature) {
+                      const thisName = home.name + ' ' + room.name + ' Temperature';
+
+                      const uuid2 = UUIDGen.generate(thisName);
+
+                      if (devices.has(uuid2)) {
+                        Logger.warn(
+                          'Multiple devices are configured with this name. Duplicate devices will be skipped.',
+                          thisName
+                        );
+                      } else {
+                        let newConfig = { ...config };
+                        newConfig.name = thisName;
+                        newConfig.subtype = 'zone-temperature';
+                        newConfig.model = newConfig.subtype;
+                        newConfig.serialNumber = hashCode(room.name);
+
+                        devices.set(uuid2, newConfig);
+                      }
+                    }
+
+                    //Configure  Separate HumiditySensor
+                    if (room.separateHumidity) {
+                      const thisName = home.name + ' ' + room.name + ' Humidity';
+
+                      const uuid2 = UUIDGen.generate(thisName);
+
+                      if (devices.has(uuid2)) {
+                        Logger.warn(
+                          'Multiple devices are configured with this name. Duplicate devices will be skipped.',
+                          thisName
+                        );
+                      } else {
+                        let newConfig = { ...config };
+                        newConfig.name = thisName;
+                        newConfig.subtype = 'zone-humidity';
+                        newConfig.model = newConfig.subtype;
+                        newConfig.serialNumber = hashCode(room.name);
 
                         devices.set(uuid2, newConfig);
                       }

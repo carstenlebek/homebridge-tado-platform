@@ -56,6 +56,15 @@ module.exports = (api, accessories, config, tado, telegram) => {
                   ? (accessory.context.config.modeTimer || 30) * 60
                   : accessory.context.config.mode;
 
+              await tado.setRoomMode(
+                config.homeId,
+                accessory.context.config.zoneId,
+                power,
+                temp,
+                mode,
+                accessory.context.config.temperatureUnit
+              );
+
               await tado.setZoneOverlay(
                 config.homeId,
                 accessory.context.config.zoneId,
@@ -94,7 +103,9 @@ module.exports = (api, accessories, config, tado, telegram) => {
                     accessory.context.config.mode === 'AUTO' &&
                     accessory.context.config.subtype.includes('heatercooler'))
                 ) {
-                  await tado.clearZoneOverlay(config.homeId, accessory.context.config.zoneId);
+                  await tado.resumeRoomSchedule(config.homeId, accessory.context.config.zoneId);
+                  // await tado.clearZoneOverlay(config.homeId, accessory.context.config.zoneId);
+                  getStates();
                   return;
                 }
 
@@ -104,6 +115,15 @@ module.exports = (api, accessories, config, tado, telegram) => {
                   accessory.context.config.subtype.includes('heatercooler')
                     ? 'MANUAL'
                     : mode;
+
+                await tado.setRoomMode(
+                  config.homeId,
+                  accessory.context.config.zoneId,
+                  power,
+                  temp,
+                  mode,
+                  accessory.context.config.temperatureUnit
+                );
 
                 await tado.setZoneOverlay(
                   config.homeId,
@@ -137,7 +157,9 @@ module.exports = (api, accessories, config, tado, telegram) => {
                   accessory.context.config.mode === 'CUSTOM' &&
                   accessory.context.config.subtype.includes('heatercooler'))
               ) {
-                await tado.clearZoneOverlay(config.homeId, accessory.context.config.zoneId);
+                await tado.resumeRoomSchedule(config.homeId, accessory.context.config.zoneId);
+                // await tado.clearZoneOverlay(config.homeId, accessory.context.config.zoneId);
+                getStates();
                 return;
               }
 
@@ -152,6 +174,15 @@ module.exports = (api, accessories, config, tado, telegram) => {
               power = 'ON';
               temp = parseFloat(value.toFixed(2));
             }
+
+            await tado.setRoomMode(
+              config.homeId,
+              accessory.context.config.zoneId,
+              power,
+              temp,
+              mode,
+              accessory.context.config.temperatureUnit
+            );
 
             await tado.setZoneOverlay(
               config.homeId,
@@ -179,6 +210,15 @@ module.exports = (api, accessories, config, tado, telegram) => {
             accessory.context.config.mode === 'TIMER'
               ? (accessory.context.config.modeTimer || 30) * 60
               : accessory.context.config.mode;
+
+          await tado.setRoomMode(
+            config.homeId,
+            accessory.context.config.zoneId,
+            power,
+            temp,
+            mode,
+            accessory.context.config.temperatureUnit
+          );
 
           await tado.setZoneOverlay(
             config.homeId,
@@ -249,8 +289,11 @@ module.exports = (api, accessories, config, tado, telegram) => {
           let zoneId = target.split('-');
           zoneId = zoneId[zoneId.length - 1];
 
-          await tado.setWindowDetection(config.homeId, zoneId, value, 3600);
-          await tado.setOpenWindowMode(config.homeId, zoneId, value);
+          // await tado.setRoomWindowDetection(config.homeId, zoneId, value, 3600);
+          await tado.setRoomOpenWindowMode(config.homeId, zoneId, value);
+
+          // await tado.setWindowDetection(config.homeId, zoneId, value, 3600);
+          // await tado.setOpenWindowMode(config.homeId, zoneId, value);
 
           break;
         }
@@ -605,6 +648,9 @@ module.exports = (api, accessories, config, tado, telegram) => {
 
       //Zones
       if (config.zones.length) await updateZones();
+
+      // Rooms
+      if (config.rooms.length) await updateRooms();
 
       //Zones Room Air Quality
       if (config.zones.length && config.zones.find((zone) => zone && zone.airQuality)) await updateRoomAirQuality();
@@ -1072,6 +1118,274 @@ module.exports = (api, accessories, config, tado, telegram) => {
             serviceSwitch.getCharacteristic(characteristicOn).updateValue(state);
           }
         });
+      }
+    }
+  }
+
+  async function updateRooms() {
+    if (!settingState) {
+      Logger.debug('Polling Rooms...', config.homeName);
+
+      //CentralSwitch
+      let inManualMode = 0;
+      let inOffMode = 0;
+      let inAutoMode = 0;
+
+      let roomsWithoutID = config.rooms.filter((room) => room && !room.id);
+
+      if (roomsWithoutID.length) {
+        const allRooms = (await tado.getRooms(config.homeId)) || [];
+
+        for (const [index, room] of config.rooms.entries()) {
+          allRooms.forEach((roomWithID) => {
+            if (roomWithID.name === room.name) config.rooms[index].id = roomWithID.id;
+          });
+        }
+      }
+
+      const allRooms = (await tado.getRooms(config.homeId)) || [];
+
+      for (const [index, room] of config.rooms.entries()) {
+        allRooms.forEach((roomWithID) => {
+          if (roomWithID.name === room.name) {
+            const heatAccessory = accessories.filter(
+              (acc) => acc && acc.displayName === config.homeName + ' ' + room.name + ' Heater'
+            );
+
+            if (heatAccessory.length) heatAccessory[0].context.config.zoneId = roomWithID.id;
+
+            config.rooms[index].id = roomWithID.id;
+            // config.zones[index].battery = !config.zones[index].noBattery
+            //   ? roomWithID.devices.filter(
+            //       (device) =>
+            //         device &&
+            //         room.type === 'HEATING' &&
+            //         typeof device.batteryState === 'string' &&
+            //         !device.batteryState.includes('NORMAL')
+            //     ).length
+            //     ? roomWithID.devices.filter((device) => device && !device.batteryState.includes('NORMAL'))[0]
+            //         .batteryState
+            //     : roomWithID.devices.filter((device) => device && device.duties.includes('ZONE_LEADER'))[0].batteryState
+            //   : false;
+            config.rooms[index].battery = false;
+            // config.zones[index].openWindowEnabled =
+            //   roomWithID.openWindowDetection && roomWithID.openWindowDetection.enabled ? true : false;
+            config.rooms[index].openWindowEnabled = false;
+          }
+        });
+      }
+
+      for (const room of config.rooms) {
+        const roomState = await tado.getRoomState(config.homeId, room.id);
+
+        let currentState, targetState, currentTemp, targetTemp, humidity, active, battery, tempEqual;
+
+        // battery = room.battery === 'NORMAL' ? 100 : 10;
+        battery = 100;
+
+        if (roomState.sensorDataPoints.humidity) humidity = roomState.sensorDataPoints.humidity.percentage;
+
+        //HEATING
+        if (roomState.sensorDataPoints.insideTemperature) {
+          currentTemp = roomState.sensorDataPoints.insideTemperature.value;
+
+          if (roomState.setting.power === 'ON') {
+            targetTemp = roomState.setting.temperature.value;
+
+            tempEqual = Math.round(currentTemp) === Math.round(targetTemp);
+
+            currentState = tempEqual ? 0 : currentTemp <= targetTemp ? 1 : 2;
+
+            targetState = 1;
+
+            active = 1;
+          } else {
+            currentState = 0;
+            targetState = 0;
+            active = 0;
+          }
+
+          if (roomState.setting.power === 'ON' && roomState.manualControlTermination === null) {
+            currentState = 0;
+            targetState = 3;
+          }
+        }
+
+        //Thermostat/HeaterCooler
+        const thermoAccessory = accessories.filter(
+          (acc) =>
+            acc &&
+            (acc.context.config.subtype === 'zone-thermostat' || acc.context.config.subtype === 'zone-heatercooler')
+        );
+
+        if (thermoAccessory.length) {
+          thermoAccessory.forEach((acc) => {
+            if (acc.displayName.includes(room.name)) {
+              let serviceThermostat = acc.getService(api.hap.Service.Thermostat);
+
+              let serviceBattery = acc.getService(api.hap.Service.BatteryService);
+              let characteristicBattery = api.hap.Characteristic.BatteryLevel;
+
+              if (serviceBattery && room.battery) {
+                serviceBattery.getCharacteristic(characteristicBattery).updateValue(battery);
+              }
+
+              if (serviceThermostat) {
+                let characteristicCurrentTemp = api.hap.Characteristic.CurrentTemperature;
+                let characteristicTargetTemp = api.hap.Characteristic.TargetTemperature;
+                let characteristicCurrentState = api.hap.Characteristic.CurrentHeatingCoolingState;
+                let characteristicTargetState = api.hap.Characteristic.TargetHeatingCoolingState;
+                let characteristicHumidity = api.hap.Characteristic.CurrentRelativeHumidity;
+                let characteristicUnit = api.hap.Characteristic.TemperatureDisplayUnits;
+
+                if (!isNaN(currentTemp)) {
+                  acc.context.config.temperatureUnit = acc.context.config.temperatureUnit || config.temperatureUnit;
+
+                  let isFahrenheit = serviceThermostat.getCharacteristic(characteristicUnit).value === 1;
+                  let unitChanged = config.temperatureUnit !== acc.context.config.temperatureUnit;
+
+                  let cToF = (c) => Math.round((c * 9) / 5 + 32);
+                  let fToC = (f) => Math.round(((f - 32) * 5) / 9);
+
+                  let newValue = unitChanged ? (isFahrenheit ? cToF(currentTemp) : fToC(currentTemp)) : currentTemp;
+
+                  serviceThermostat.getCharacteristic(characteristicCurrentTemp).updateValue(newValue);
+                }
+
+                if (!isNaN(targetTemp))
+                  serviceThermostat.getCharacteristic(characteristicTargetTemp).updateValue(targetTemp);
+
+                if (!isNaN(currentState))
+                  serviceThermostat.getCharacteristic(characteristicCurrentState).updateValue(currentState);
+
+                if (!isNaN(targetState))
+                  serviceThermostat.getCharacteristic(characteristicTargetState).updateValue(targetState);
+
+                if (!isNaN(humidity) && serviceThermostat.testCharacteristic(characteristicHumidity))
+                  serviceThermostat.getCharacteristic(characteristicHumidity).updateValue(humidity);
+              }
+            }
+          });
+        }
+
+        //TemperatureSensor
+        const tempAccessory = accessories.filter((acc) => acc && acc.context.config.subtype === 'zone-temperature');
+
+        if (tempAccessory.length) {
+          tempAccessory.forEach((acc) => {
+            if (acc.displayName.includes(room.name)) {
+              let serviceBattery = acc.getService(api.hap.Service.BatteryService);
+              let characteristicBattery = api.hap.Characteristic.BatteryLevel;
+
+              if (serviceBattery && !isNaN(battery)) {
+                serviceBattery.getCharacteristic(characteristicBattery).updateValue(battery);
+              }
+
+              if (!isNaN(currentTemp)) {
+                let service = acc.getService(api.hap.Service.TemperatureSensor);
+                let characteristic = api.hap.Characteristic.CurrentTemperature;
+
+                service.getCharacteristic(characteristic).updateValue(currentTemp);
+              }
+            }
+          });
+        }
+
+        //HumiditySensor
+        const humidityAccessory = accessories.filter((acc) => acc && acc.context.config.subtype === 'zone-humidity');
+
+        humidityAccessory.forEach((acc) => {
+          if (acc.displayName.includes(room.name)) {
+            let serviceBattery = acc.getService(api.hap.Service.BatteryService);
+            let characteristicBattery = api.hap.Characteristic.BatteryLevel;
+
+            if (serviceBattery && !isNaN(battery)) {
+              serviceBattery.getCharacteristic(characteristicBattery).updateValue(battery);
+            }
+
+            if (!isNaN(humidity)) {
+              let service = acc.getService(api.hap.Service.HumiditySensor);
+              let characteristic = api.hap.Characteristic.CurrentRelativeHumidity;
+
+              service.getCharacteristic(characteristic).updateValue(humidity);
+            }
+          }
+        });
+
+        //WindowSensor
+        const windowContactAccessory = accessories.filter(
+          (acc) => acc && acc.context.config.subtype === 'zone-window-contact'
+        );
+        const windowSwitchAccessory = accessories.filter(
+          (acc) => acc && acc.displayName === acc.context.config.homeName + ' Open Window'
+        );
+
+        if (windowContactAccessory.length) {
+          windowContactAccessory.forEach((acc) => {
+            if (acc.displayName.includes(room.name)) {
+              let serviceBattery = acc.getService(api.hap.Service.BatteryService);
+              let characteristicBattery = api.hap.Characteristic.BatteryLevel;
+
+              if (serviceBattery && !isNaN(battery)) {
+                serviceBattery.getCharacteristic(characteristicBattery).updateValue(battery);
+              }
+
+              let service = acc.getService(api.hap.Service.ContactSensor);
+              let characteristic = api.hap.Characteristic.ContactSensorState;
+
+              let state = roomState.openWindow || roomState.openWindowDetected ? 1 : 0;
+
+              service.getCharacteristic(characteristic).updateValue(state);
+            }
+          });
+        }
+
+        if (windowSwitchAccessory.length) {
+          windowSwitchAccessory[0].services.forEach((switchService) => {
+            if (switchService.subtype && switchService.subtype.includes(room.name)) {
+              let service = windowSwitchAccessory[0].getServiceById(api.hap.Service.Switch, switchService.subtype);
+              let characteristic = api.hap.Characteristic.On;
+
+              let state = room.openWindowEnabled ? true : false;
+
+              service.getCharacteristic(characteristic).updateValue(state);
+            }
+          });
+        }
+
+        //CentralSwitch
+        if (roomState.manualControlTermination === null) inAutoMode += 1;
+
+        if (roomState.setting.power === 'OFF') inOffMode += 1;
+
+        if (roomState.manualControlTermination !== null && roomState.setting.power === 'ON') inManualMode += 1;
+
+        //CentralSwitch
+        const centralSwitchAccessory = accessories.filter(
+          (acc) => acc && acc.displayName === acc.context.config.homeName + ' Central Switch'
+        );
+
+        if (centralSwitchAccessory.length) {
+          centralSwitchAccessory[0].services.forEach((service) => {
+            if (service.subtype === 'Central') {
+              let serviceSwitch = centralSwitchAccessory[0].getServiceById(api.hap.Service.Switch, service.subtype);
+              let characteristicOn = api.hap.Characteristic.On;
+              let characteristicAuto = api.hap.Characteristic.AutoThermostats;
+              let characteristicOff = api.hap.Characteristic.OfflineThermostats;
+              let characteristicManual = api.hap.Characteristic.ManualThermostats;
+
+              let state = (inManualMode || inAutoMode) !== 0;
+
+              serviceSwitch.getCharacteristic(characteristicAuto).updateValue(inAutoMode);
+
+              serviceSwitch.getCharacteristic(characteristicManual).updateValue(inManualMode);
+
+              serviceSwitch.getCharacteristic(characteristicOff).updateValue(inOffMode);
+
+              serviceSwitch.getCharacteristic(characteristicOn).updateValue(state);
+            }
+          });
+        }
       }
     }
   }

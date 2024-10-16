@@ -3,10 +3,13 @@
 const Logger = require('../helper/logger.js');
 
 const got = require('got');
-const { ResourceOwnerPassword } = require('simple-oauth2');
+const { AccessToken, AuthorizationCode } = require('simple-oauth2');
+const crypto = require('node:crypto');
+const { parse } = require('node-html-parser');
 
 const EXPIRATION_WINDOW_IN_SECONDS = 300;
 const tado_url = 'https://my.tado.com';
+const hops_url = 'https://hops.tado.com';
 
 class Tado {
   constructor(name, credentials) {
@@ -24,19 +27,77 @@ class Tado {
       },
     };
 
-    this.client = new ResourceOwnerPassword(params);
+    this.clientConfig = params;
+    this.client = new AuthorizationCode(params);
 
     Logger.debug('API successfull initialized', this.name);
   }
 
   async _login() {
-    const tokenParams = {
-      username: this.credentials.username,
-      password: this.credentials.password,
-      scope: 'home.user',
+    const generatePKCE = (length = 128) => {
+      const bytesLength = Math.ceil((length * 3) / 4);
+      const code_verifier = crypto.randomBytes(bytesLength).toString('base64url');
+      const code_challenge = crypto.createHash('sha256').update(code_verifier).digest('base64url');
+      return { code_verifier, code_challenge, code_challenge_method: 'S256' };
     };
 
-    this._accessToken = await this.client.getToken(tokenParams);
+    const { code_verifier, code_challenge, code_challenge_method } = generatePKCE();
+    const state = crypto.randomBytes(16).toString('hex');
+
+    const authorizationUri = this.client.authorizeURL({
+      redirect_uri: 'https://app.tado.com/de/auth/authorize',
+      scope: 'home.user',
+      state: state,
+      code_challenge,
+      code_challenge_method,
+    });
+
+    const res = await got.get(authorizationUri).text();
+    const root = parse(res);
+    const accessTokenInput = root.querySelector('input[name="access_token"]');
+    const initialAccessToken = accessTokenInput._attrs.value;
+
+    const getAuthCode = async (accessToken, username, password) => {
+      const response = await got.post('https://auth.tado.com/login', {
+        form: {
+          access_token: accessToken,
+          client_id: this.clientConfig.client.id,
+          username,
+          password,
+        },
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        followRedirect: false,
+        throwHttpErrors: false,
+      });
+
+      if (response.statusCode === 302) {
+        const location = response.headers.location;
+        const url = new URL(location);
+        const code = url.searchParams.get('code');
+        if (code) return code;
+        throw new Error('Code not found in redirect URL');
+      }
+      throw new Error(`Unexpected status code: ${response.statusCode}`);
+    };
+
+    const code = await getAuthCode(initialAccessToken, this.credentials.username, this.credentials.password);
+
+    try {
+      const tokenParams = {
+        code,
+        redirect_uri: 'https://app.tado.com/de/auth/authorize',
+        code_verifier,
+      };
+
+      const accessToken = await this.client.getToken(tokenParams);
+      this._accessToken = accessToken;
+      Logger.debug('Access token acquired successfully', this.name);
+    } catch (error) {
+      Logger.error('Access Token Error', error.message);
+      throw error;
+    }
   }
 
   async _refreshToken() {
@@ -62,7 +123,7 @@ class Tado {
 
     await this._refreshToken();
 
-    let tadoLink = tado_url_dif || tado_url;
+    const tadoLink = tado_url_dif || tado_url;
 
     Logger.debug('Using ' + tadoLink, this.name);
 
@@ -76,11 +137,14 @@ class Tado {
       this.name
     );
 
-    let config = {
+    const config = {
       method: method,
       responseType: 'json',
       headers: {
         Authorization: 'Bearer ' + this._accessToken.token.access_token,
+      },
+      searchParams: {
+        'ngsw-bypass': 'true',
       },
       timeout: 30000,
       retry: {
@@ -88,13 +152,14 @@ class Tado {
         statusCodes: [408, 429, 503, 504],
         methods: ['GET', 'POST', 'DELETE', 'PUT'],
       },
+      throwHttpErrors: false,
     };
 
     if (Object.keys(data).length) config.json = data;
 
     if (Object.keys(params).length) config.searchParams = params;
 
-    const response = await got(tadoLink + path, config);
+    const response = await got(tadoLink + path, config).catch(console.error);
 
     Logger.debug(
       'API request ' +
@@ -398,6 +463,81 @@ class Tado {
     if (to) period.to = to;
 
     return this.apiCall(`/v1/homes/${home_id}/runningTimes`, 'GET', {}, period, 'https://minder.tado.com', false);
+  }
+
+  async getRooms(home_id) {
+    return this.apiCall(`/homes/${home_id}/rooms`, 'GET', undefined, undefined, hops_url);
+  }
+
+  async getRoomState(home_id, room_id) {
+    return this.apiCall(`/homes/${home_id}/rooms/${room_id}`, 'GET', undefined, undefined, hops_url);
+  }
+
+  async setRoomMode(home_id, room_id, power, temperature, termination, tempUnit) {
+    console.log({ termination });
+    const room_state = await this.getRoomState(home_id, room_id);
+
+    const config = {
+      setting: room_state.setting,
+      termination: {},
+    };
+
+    if (power.toLowerCase() === 'on') {
+      config.setting.power = 'ON';
+
+      if (temperature && !isNaN(temperature)) {
+        if (tempUnit.toLowerCase() === 'fahrenheit') temperature = ((temperature - 32) * 5) / 9;
+
+        config.setting.temperature = { value: temperature, valueRaw: temperature, precision: 0.1 };
+      } else {
+        config.setting.temperature = null;
+      }
+    } else {
+      config.setting.power = 'OFF';
+      config.setting.temperature = null;
+      config.termination.type = 'MANUAL';
+      return this.apiCall(`/homes/${home_id}/rooms/${room_id}/manualControl`, 'POST', config, undefined, hops_url);
+    }
+
+    if (termination && termination.toLowerCase() == 'auto') {
+      config.termination.type = 'NEXT_TIME_BLOCK';
+      return this.apiCall(`/homes/${home_id}/rooms/${room_id}/manualControl`, 'POST', config, undefined, hops_url);
+    }
+
+    if (termination && termination.toLowerCase() == 'custom') {
+      config.termination.type = 'MANUAL';
+      return this.apiCall(`/homes/${home_id}/rooms/${room_id}/manualControl`, 'POST', config, undefined, hops_url);
+    }
+  }
+
+  async resumeRoomSchedule(home_id, room_id) {
+    return this.apiCall(`/homes/${home_id}/rooms/${room_id}/resumeSchedule`, 'POST', {}, undefined, hops_url);
+  }
+
+  async setRoomWindowDetection(home_id, room_id, enabled, timeout) {
+    const config = {
+      enabled: enabled,
+      timeoutInSeconds: timeout,
+    };
+
+    return this.apiCall(`/homes/${home_id}/settings/owd/rooms/${room_id}`, 'PUT', config, undefined, hops_url);
+  }
+
+  async setRoomOpenWindowMode(home_id, room_id, activate) {
+    if (activate) {
+      return this.apiCall(
+        `/homes/${home_id}/rooms/${room_id}/openWindow`,
+        'POST',
+        {
+          activated: true,
+          expiryInSeconds: 1728921159,
+        },
+        undefined,
+        hops_url
+      );
+    } else {
+      return this.apiCall(`/homes/${home_id}/rooms/${room_id}/openWindow`, 'DELETE', undefined, undefined, hops_url);
+    }
   }
 }
 
